@@ -20,7 +20,7 @@ use crate::{
     utils::{
         assert_derivation, assert_initialized, assert_owned_by, assert_signer,
         assert_token_program_matches_package, create_or_allocate_account_raw, spl_token_transfer,
-        TokenTransferParams,
+        TokenTransferParams,spl_token_transfer_with_key,TokenTransferParamsWithKey,
     },
     EXTENDED, PREFIX,
 };
@@ -281,26 +281,22 @@ pub fn place_bid<'r, 'b: 'r>(
         .ok_or(AuctionError::NumericalOverflowError)?;
     auction_extended.serialize(&mut *accounts.auction_extended.data.borrow_mut())?;
 
-    let mut bid_price = args.amount;
-
-    if let Some(instant_sale_price) = auction_extended.instant_sale_price {
-        if args.amount > instant_sale_price {
-            msg!("Received amount is more than instant_sale_price so it was reduced to instant_sale_price - {:?}", instant_sale_price);
-            bid_price = instant_sale_price;
-        }
-    }
-
     // Confirm payers SPL token balance is enough to pay the bid.
     let account: Account = Account::unpack_from_slice(&accounts.bidder_token.data.borrow())?;
-    if account.amount.saturating_sub(bid_price) < 0 {
+    if account.amount.saturating_sub(args.amount) < 0 {
         msg!(
             "Amount is too small: {:?}, compared to account amount of {:?}",
-            bid_price,
+            args.amount,
             account.amount
         );
         return Err(AuctionError::BalanceTooLow.into());
     }
 
+    let real_amount=auction.get_real_amount(
+        args.amount,
+        auction_extended.tick_size,
+        auction_extended.reward_size,
+    )?;
     // Transfer amount of SPL token to bid account.
     spl_token_transfer(TokenTransferParams {
         source: accounts.bidder_token.clone(),
@@ -308,25 +304,55 @@ pub fn place_bid<'r, 'b: 'r>(
         authority: accounts.transfer_authority.clone(),
         authority_signer_seeds: bump_authority_seeds,
         token_program: accounts.token_program.clone(),
-        amount: bid_price,
+        amount: real_amount,
     })?;
 
     // Serialize new Auction State
     auction.last_bid = Some(clock.unix_timestamp);
-    auction.place_bid(
-        Bid(*accounts.bidder.key, bid_price),
+    let res=auction.place_bid(
+        Bid(*accounts.bidder.key, args.amount,),
         auction_extended.tick_size,
-        auction_extended.gap_tick_size_percentage,
         clock.unix_timestamp,
-        auction_extended.instant_sale_price,
     )?;
+    
+    let reward = match auction_extended.reward_size {
+        Some(val) => val,
+        None => 0,
+    };
+    
+    if res==1 {
+        if reward > 0 {
+            let prev_key=match auction_extended.prev_bidder_token {
+                Some(key) => key,
+                None => *accounts.bidder_token.key,
+            };
+            spl_token_transfer_with_key(TokenTransferParamsWithKey {
+                source: accounts.bidder_token.clone(),
+                destination :  prev_key ,
+                authority: accounts.transfer_authority.clone(),
+                authority_signer_seeds: bump_authority_seeds,
+                token_program: accounts.token_program.clone(),
+                amount: reward,
+            })?;
+            auction.bid_state.cancel_prev_bid();
+            auction_extended.prev_bidder_token=Some(*accounts.bidder_token.key);
+            auction_extended.serialize(&mut *accounts.auction_extended.data.borrow_mut())?;
+        }
+    } else {
+        if res==2 {
+            auction_extended.prev_bidder_token=Some(*accounts.bidder_token.key);
+            auction_extended.serialize(&mut *accounts.auction_extended.data.borrow_mut())?;
+        }
+    }
+
+
     auction.serialize(&mut *accounts.auction.data.borrow_mut())?;
 
     // Update latest metadata with results from the bid.
     BidderMetadata {
         bidder_pubkey: *accounts.bidder.key,
         auction_pubkey: *accounts.auction.key,
-        last_bid: bid_price,
+        last_bid: real_amount,
         last_bid_timestamp: clock.unix_timestamp,
         cancelled: false,
     }
