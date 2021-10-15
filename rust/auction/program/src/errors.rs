@@ -134,6 +134,28 @@ pub enum AuctionError {
     /// Gap tick size percentage must be between 0 and 100
     #[error("Gap tick size percentage must be between 0 and 100")]
     InvalidGapTickSizePercentage,
+
+    /// Reward size must be smaller than tick size
+    #[error("Reward size must be smaller than tick size")]
+    InvalidRewardSize,
+
+    ///Tick size cannot be zero.
+    #[error("Tick size cannot be zero.")]
+    InvalidTickSize,
+
+    ///Prev key is not invalid.
+    #[error("Invalid prev key")]
+    InvalidPrevKey,
+
+    ///You are not allowed to cancel bid
+    #[error("Not allowed to cancel bid")]
+    NotAllowedToCancelBid,
+
+    #[error("You are the largest bidder, so you cannot place bid again")]
+    NotAllowedPlace,
+
+    #[error("Previous bidder is invalid.")]
+    InvalidPrevBidder,
 }
 
 impl PrintProgramError for AuctionError {

@@ -11,21 +11,23 @@ use std::{cell::Ref, cmp, mem};
 pub mod cancel_bid;
 pub mod claim_bid;
 pub mod create_auction;
-pub mod create_auction_v2;
 pub mod end_auction;
 pub mod place_bid;
 pub mod set_authority;
 pub mod start_auction;
+pub mod create_auction_v2;
+pub mod place_bid_v2;
 
 // Re-export submodules handlers + associated types for other programs to consume.
 pub use cancel_bid::*;
 pub use claim_bid::*;
 pub use create_auction::*;
-pub use create_auction_v2::*;
 pub use end_auction::*;
 pub use place_bid::*;
 pub use set_authority::*;
 pub use start_auction::*;
+pub use create_auction_v2::*;
+pub use place_bid_v2::*;
 
 pub fn process_instruction(
     program_id: &Pubkey,
@@ -36,14 +38,13 @@ pub fn process_instruction(
     match AuctionInstruction::try_from_slice(input)? {
         AuctionInstruction::CancelBid(args) => cancel_bid(program_id, accounts, args),
         AuctionInstruction::ClaimBid(args) => claim_bid(program_id, accounts, args),
-        AuctionInstruction::CreateAuction(args) => {
-            create_auction(program_id, accounts, args, None, None)
-        }
-        AuctionInstruction::CreateAuctionV2(args) => create_auction_v2(program_id, accounts, args),
+        AuctionInstruction::CreateAuction(args) => create_auction(program_id, accounts, args, None),
+        AuctionInstruction::CreateAuctionV2(args) => create_auction_v2(program_id,accounts,args),
         AuctionInstruction::EndAuction(args) => end_auction(program_id, accounts, args),
         AuctionInstruction::PlaceBid(args) => place_bid(program_id, accounts, args),
         AuctionInstruction::SetAuthority => set_authority(program_id, accounts),
         AuctionInstruction::StartAuction(args) => start_auction(program_id, accounts, args),
+        AuctionInstruction::PlaceBidV2(args) => place_bid_v2(program_id,accounts,args),
     }
 }
 
@@ -66,7 +67,7 @@ pub enum PriceFloor {
 // NOTE: New research suggests u32s are used for vecs in borsh, not u64s, so the first extra 8 should be a 4
 // but for legacy reasons we leave it behind.
 pub const BASE_AUCTION_DATA_SIZE: usize = 32 + 32 + 9 + 9 + 9 + 9 + 1 + 32 + 1 + 8 + 8 + 8;
-pub const BID_LENGTH: usize = 32 + 8;
+pub const BID_LENGTH: usize = 32 + 8 +32+32;
 #[repr(C)]
 #[derive(Clone, BorshSerialize, BorshDeserialize, PartialEq, Debug)]
 pub struct AuctionData {
@@ -95,10 +96,7 @@ pub struct AuctionData {
     pub bid_state: BidState,
 }
 
-// Alias for auction name.
-pub type AuctionName = [u8; 32];
-
-pub const MAX_AUCTION_DATA_EXTENDED_SIZE: usize = 8 + 9 + 2 + 9 + 33 + 158;
+pub const MAX_AUCTION_DATA_EXTENDED_SIZE: usize = 8 + 9 + 2 + 9 + 191;
 // Further storage for more fields. Would like to store more on the main data but due
 // to a borsh issue that causes more added fields to inflict "Access violation" errors
 // during redemption in main Metaplex app for no reason, we had to add this nasty PDA.
@@ -112,10 +110,8 @@ pub struct AuctionDataExtended {
     pub tick_size: Option<u64>,
     /// gap_tick_size_percentage - two decimal points
     pub gap_tick_size_percentage: Option<u8>,
-    /// Instant sale price
-    pub instant_sale_price: Option<u64>,
-    /// Auction name
-    pub name: Option<AuctionName>,
+    /// Reward size
+    pub reward_size: Option<u64>,
 }
 
 impl AuctionDataExtended {
@@ -127,37 +123,6 @@ impl AuctionDataExtended {
         let auction_extended: AuctionDataExtended = try_from_slice_unchecked(&a.data.borrow_mut())?;
 
         Ok(auction_extended)
-    }
-
-    pub fn get_instant_sale_price<'a>(data: &'a Ref<'a, &'a mut [u8]>) -> Option<u64> {
-        if let Some(idx) = Self::find_instant_sale_beginning(data) {
-            Some(u64::from_le_bytes(*array_ref![data, idx, 8]))
-        } else {
-            None
-        }
-    }
-
-    fn find_instant_sale_beginning<'a>(data: &'a Ref<'a, &'a mut [u8]>) -> Option<usize> {
-        // total_uncancelled_bids + tick_size Option
-        let mut instant_sale_beginning = 8;
-
-        // gaps for tick_size and gap_tick_size_percentage
-        let gaps = [9, 2];
-
-        for gap in gaps.iter() {
-            if data[instant_sale_beginning] == 1 {
-                instant_sale_beginning += gap;
-            } else {
-                instant_sale_beginning += 1;
-            }
-        }
-
-        // check if instant_sale_price has some value
-        if data[instant_sale_beginning] == 1 {
-            Some(instant_sale_beginning + 1)
-        } else {
-            None
-        }
     }
 }
 
@@ -282,37 +247,6 @@ impl AuctionData {
         ])
     }
 
-    pub fn get_winner_bid_amount_at(a: &AccountInfo, idx: usize) -> Option<u64> {
-        let (bid_state_beginning, num_elements, max) = AuctionData::get_vec_info(a);
-        match AuctionData::get_winner_bid_amount_at_inner(
-            &a.data.borrow(),
-            idx,
-            bid_state_beginning,
-            num_elements,
-            max,
-        ) {
-            Some(bid_amount) => Some(bid_amount),
-            None => None,
-        }
-    }
-
-    fn get_winner_bid_amount_at_inner<'a>(
-        data: &'a Ref<'a, &'a mut [u8]>,
-        idx: usize,
-        bid_state_beginning: usize,
-        num_elements: usize,
-        max: usize,
-    ) -> Option<u64> {
-        if idx + 1 > num_elements || idx + 1 > max {
-            return None;
-        }
-        Some(u64::from_le_bytes(*array_ref![
-            data,
-            bid_state_beginning + (num_elements - idx - 1) * BID_LENGTH + 32,
-            8
-        ]))
-    }
-
     pub fn from_account_info(a: &AccountInfo) -> Result<AuctionData, ProgramError> {
         if (a.data_len() - BASE_AUCTION_DATA_SIZE) % mem::size_of::<Bid>() != 0 {
             return Err(AuctionError::DataTypeMismatch.into());
@@ -370,56 +304,62 @@ impl AuctionData {
         self.bid_state.winner_at(idx)
     }
 
-    pub fn consider_instant_bid(&mut self, instant_sale_price: Option<u64>) {
-        // Check if all the lots were sold with instant_sale_price
-        if let Some(price) = instant_sale_price {
-            if self
-                .bid_state
-                .lowest_winning_bid_is_instant_bid_price(price)
-            {
-                msg!("All the lots were sold with instant_sale_price, auction is ended");
-                self.state = AuctionState::Ended;
-            }
-        }
-    }
-
     pub fn place_bid(
         &mut self,
         bid: Bid,
         tick_size: Option<u64>,
-        gap_tick_size_percentage: Option<u8>,
         now: UnixTimestamp,
-        instant_sale_price: Option<u64>,
-    ) -> Result<(), ProgramError> {
-        let gap_val = match self.ended_at {
-            Some(end) => {
-                // We use the actual gap tick size perc if we're in gap window,
-                // otherwise we pass in none so the logic isnt used
-                if now > end {
-                    gap_tick_size_percentage
-                } else {
-                    None
-                }
-            }
-            None => None,
-        };
+    ) -> Result<u8, ProgramError> {
         let minimum = match self.price_floor {
             PriceFloor::MinimumPrice(min) => min[0],
             _ => 0,
         };
+        self.bid_state.place_bid(bid, tick_size, minimum)
+    }
 
-        self.bid_state.place_bid(
-            bid,
-            tick_size,
-            gap_val,
-            minimum,
-            instant_sale_price,
-            &mut self.state,
-        )?;
+    pub fn get_real_amount(
+        &mut self,
+        amount : u64,
+        tick_size : Option<u64>,
+        reward_size : Option<u64>,
+    ) -> Result<u64, ProgramError> {
+        let mut tick : u64 = 0;
+        let mut reward : u64 = 0;
+        let mut start : u64 = 0;
+        match tick_size{
+            Some(val) => {tick=val}
+            None => {tick=0}
+        };
+        msg!("  {}  ",tick);
+        if tick==0 {
+            return Err(AuctionError::InvalidTickSize.into());
+        }
+       match reward_size {
+            Some(val) => {reward=val}
+            None => {reward=0}
+        };
+        msg!("  {}  ",reward);
+        
+        match self.price_floor{
+            PriceFloor::MinimumPrice(min) => start=min[0],
+            _ => start=0,
+        };
+        if tick < reward {
+            return Err(AuctionError::InvalidTickSize.into());
+        }
+        let real_amount = start as u64 + (((amount-start) as f64)*(1.0 as f64-(reward as f64)/(tick as f64))) as u64;
+        Ok(real_amount)
+    }
 
-        self.consider_instant_bid(instant_sale_price);
-
-        Ok(())
+    pub fn get_prev_key(&mut self) -> Result<Pubkey,ProgramError> {
+        match self.bid_state {
+            BidState::EnglishAuction{ref mut bids, max} => {
+                Ok(bids[0].2)
+            }
+            BidState::OpenEdition{ref mut bids,max} => {
+                return Err(AuctionError::InvalidPrevKey.into());
+            }
+        }
     }
 }
 
@@ -458,7 +398,7 @@ impl AuctionState {
 /// Bids associate a bidding key with an amount bid.
 #[repr(C)]
 #[derive(Clone, BorshSerialize, BorshDeserialize, PartialEq, Debug)]
-pub struct Bid(pub Pubkey, pub u64);
+pub struct Bid(pub Pubkey, pub u64, pub Pubkey, pub Pubkey);
 
 /// BidState tracks the running state of an auction, each variant represents a different kind of
 /// auction being run.
@@ -546,13 +486,10 @@ impl BidState {
         &mut self,
         bid: Bid,
         tick_size: Option<u64>,
-        gap_tick_size_percentage: Option<u8>,
         minimum: u64,
-        instant_sale_price: Option<u64>,
-        auction_state: &mut AuctionState,
-    ) -> Result<(), ProgramError> {
+    ) -> Result<u8, ProgramError> {
         msg!("Placing bid {:?}", &bid.1.to_string());
-        BidState::assert_valid_tick_size_bid(&bid, tick_size)?;
+        BidState::assert_valid_tick_size_bid(&bid,tick_size)?;
         if bid.1 < minimum {
             return Err(AuctionError::BidTooSmall.into());
         }
@@ -562,69 +499,56 @@ impl BidState {
             BidState::EnglishAuction { ref mut bids, max } => {
                 match bids.last() {
                     Some(top) => {
-                        msg!("Looking to go over the loop, but check tick size first");
+                        // let tick = match tick_size {
+                        //     Some(val) => val,
+                        //     None => 0,
+                        // };
 
-                        for i in (0..bids.len()).rev() {
-                            msg!("Comparison of {:?} and {:?} for {:?}", bids[i].1, bid.1, i);
-                            if bids[i].1 < bid.1 {
-                                if let Some(gap_tick) = gap_tick_size_percentage {
-                                    BidState::assert_valid_gap_insertion(gap_tick, &bids[i], &bid)?
-                                }
+                        // if tick==0 {return Err(AuctionError::InvalidTickSize.into());}
 
-                                msg!("Ok we can do an insert");
-                                if i + 1 < bids.len() {
-                                    msg!("Doing a normal insert");
-                                    bids.insert(i + 1, bid);
-                                } else {
-                                    msg!("Doing an on the end insert");
-                                    bids.push(bid)
-                                }
-                                break;
-                            } else if bids[i].1 == bid.1 {
-                                if let Some(gap_tick) = gap_tick_size_percentage {
-                                    if gap_tick > 0 {
-                                        msg!("Rejecting same-bid insert due to gap tick size of {:?}", gap_tick);
-                                        return Err(AuctionError::GapBetweenBidsTooSmall.into());
-                                    }
-                                }
-
-                                msg!("Ok we can do an equivalent insert");
-                                if i == 0 {
-                                    msg!("Doing a normal insert");
-                                    bids.insert(0, bid);
-                                    break;
-                                } else {
-                                    if bids[i - 1].1 != bids[i].1 {
-                                        msg!("Doing an insert just before");
-                                        bids.insert(i, bid);
-                                        break;
-                                    }
-                                    msg!("More duplicates ahead...")
-                                }
-                            } else if i == 0 {
-                                msg!("Inserting at 0");
-                                bids.insert(0, bid);
-                                break;
-                            }
+                        // let mut minimum_bid : u128 = (bids[0].1 as u128)
+                        //     .checked_add(tick as u128)
+                        //     .ok_or(AuctionError::NumericalOverflowError)?;
+                        if(bid.1 as u128 > bids[0].1 as u128){
+                            bids.push(bid);
+                            Ok(1)
+                        }else {
+                            Ok(0)
                         }
-
-                        let max_size = BidState::max_array_size_for(*max);
-
-                        if bids.len() > max_size {
-                            bids.remove(0);
-                        }
-                        Ok(())
                     }
                     _ => {
                         msg!("Pushing bid onto stack");
                         bids.push(bid);
-                        Ok(())
+                        Ok(2)
                     }
                 }
             }
 
             // In an open auction, bidding simply succeeds.
-            BidState::OpenEdition { bids, max } => Ok(()),
+            BidState::OpenEdition { bids, max } => Ok(0),
+        }
+    }
+
+    pub fn is_prev_bidder(&mut self,prev_bidder : Pubkey,prev_bidder_token : Pubkey,prev_bidder_pot_token : Pubkey) -> Result<(),ProgramError>{
+        match self {
+            BidState::EnglishAuction{ ref mut bids,max} =>{
+                match bids.last(){
+                    Some(top) =>{
+                        if prev_bidder != bids[0].0{
+                            return Err(AuctionError::InvalidPrevBidder.into());
+                        }
+                        if prev_bidder_token != bids[0].2{
+                            return Err(AuctionError::InvalidPrevBidder.into());
+                        }
+                        if prev_bidder_pot_token != bids[0].3{
+                            return Err(AuctionError::InvalidPrevBidder.into());
+                        }
+                        Ok(())
+                    }
+                    _ => {return Err(AuctionError::InvalidPrevBidder.into());}
+                }
+            }
+            BidState::OpenEdition{bids,max} => {return Err(AuctionError::InvalidPrevBidder.into());}
         }
     }
 
@@ -640,6 +564,31 @@ impl BidState {
             // In an open auction, cancelling simply succeeds. It's up to the manager of an auction
             // to decide what to do with open edition bids.
             BidState::OpenEdition { bids, max } => Ok(()),
+        }
+    }
+
+    pub fn can_cancel(&mut self, key: Pubkey) -> u8 {
+        match self {
+            BidState::EnglishAuction { ref mut bids, max } => {
+                match bids.last() {
+                    Some(top) => {
+                        if bids[0].0 == key { return 1;}
+                        else {return 0}
+                    }
+                    _ => {return 0;}
+                }
+            }
+            BidState::OpenEdition { bids, max } => { return 0;},
+        }
+    }
+
+    pub fn cancel_prev_bid(&mut self) -> Result<(),ProgramError> {
+        match self {
+            BidState::EnglishAuction{ref mut bids,max} => {
+                bids.remove(0);
+                Ok(())
+            }
+            BidState::OpenEdition {bids, max} => Ok(()),
         }
     }
 
@@ -707,17 +656,6 @@ impl BidState {
                 }
             }
             BidState::OpenEdition { bids, max } => None,
-        }
-    }
-
-    pub fn lowest_winning_bid_is_instant_bid_price(&self, instant_sale_amount: u64) -> bool {
-        match self {
-            // In a capped auction, track the limited number of winners.
-            BidState::EnglishAuction { bids, max } => {
-                // bids.len() - max = index of the last winner bid
-                bids.len() >= *max && bids[bids.len() - *max].1 >= instant_sale_amount
-            }
-            _ => false,
         }
     }
 }

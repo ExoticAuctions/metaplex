@@ -20,7 +20,7 @@ use crate::{
     utils::{
         assert_derivation, assert_initialized, assert_owned_by, assert_signer,
         assert_token_program_matches_package, create_or_allocate_account_raw, spl_token_transfer,
-        TokenTransferParams,
+        TokenTransferParams,spl_token_transfer_2,TokenTransferParams_2,
     },
     EXTENDED, PREFIX,
 };
@@ -50,7 +50,7 @@ use {
 /// Arguments for the PlaceBid instruction discriminant .
 #[repr(C)]
 #[derive(Clone, BorshSerialize, BorshDeserialize, PartialEq)]
-pub struct PlaceBidArgs {
+pub struct PlaceBidArgsV2 {
     /// Size of the bid being placed. The user must have enough SOL to satisfy this amount.
     pub amount: u64,
     /// Resource being bid on.
@@ -72,6 +72,9 @@ struct Accounts<'a, 'b: 'a> {
     system: &'a AccountInfo<'b>,
     token_program: &'a AccountInfo<'b>,
     transfer_authority: &'a AccountInfo<'b>,
+    prev_bidder : &'a AccountInfo<'b>,
+    prev_bidder_token : &'a AccountInfo<'b>,
+    prev_bidder_pot_token : &'a AccountInfo<'b>,
 }
 
 fn parse_accounts<'a, 'b: 'a>(
@@ -94,6 +97,9 @@ fn parse_accounts<'a, 'b: 'a>(
         rent: next_account_info(account_iter)?,
         system: next_account_info(account_iter)?,
         token_program: next_account_info(account_iter)?,
+        prev_bidder : next_account_info(account_iter)?,
+        prev_bidder_token : next_account_info(account_iter)?,
+        prev_bidder_pot_token : next_account_info(account_iter)?,
     };
 
     assert_owned_by(accounts.auction, program_id)?;
@@ -122,10 +128,10 @@ fn parse_accounts<'a, 'b: 'a>(
 }
 
 #[allow(clippy::absurd_extreme_comparisons)]
-pub fn place_bid<'r, 'b: 'r>(
+pub fn place_bid_v2<'r, 'b: 'r>(
     program_id: &Pubkey,
     accounts: &'r [AccountInfo<'b>],
-    args: PlaceBidArgs,
+    args: PlaceBidArgsV2,
 ) -> ProgramResult {
     msg!("+ Processing PlaceBid");
     let accounts = parse_accounts(program_id, accounts)?;
@@ -198,6 +204,9 @@ pub fn place_bid<'r, 'b: 'r>(
         ],
     )?;
 
+    if *accounts.bidder.key == *accounts.prev_bidder.key {
+        return Err(AuctionError::NotAllowedPlace.into());
+    }
     // The account within the pot must be owned by us.
     let actual_account: Account = assert_initialized(accounts.bidder_pot_token)?;
     if actual_account.owner != *accounts.auction.key {
@@ -292,26 +301,34 @@ pub fn place_bid<'r, 'b: 'r>(
         return Err(AuctionError::BalanceTooLow.into());
     }
 
-    
-    // Transfer amount of SPL token to bid account.
-    
-
-    // Serialize new Auction State
-    auction.last_bid = Some(clock.unix_timestamp);
-    let res=auction.place_bid(
-        Bid(*accounts.bidder.key, args.amount, *accounts.bidder_token.key, *accounts.bidder_pot_token.key),
-        auction_extended.tick_size,
-        clock.unix_timestamp,
-    )?;
-    
     let real_amount=auction.get_real_amount(
         args.amount,
         auction_extended.tick_size,
         auction_extended.reward_size,
     )?;
     
-    if res==2{
 
+
+
+    // Serialize new Auction State
+    auction.last_bid = Some(clock.unix_timestamp);
+    
+    auction.bid_state.is_prev_bidder(*accounts.prev_bidder.key,*accounts.prev_bidder_token.key,*accounts.prev_bidder_pot_token.key)?;
+
+    let res=auction.place_bid(
+        Bid(*accounts.bidder.key, args.amount, *accounts.bidder_token.key, *accounts.bidder_pot_token.key),
+        auction_extended.tick_size,
+        clock.unix_timestamp,
+    )?;
+    
+    let mut reward : u64 = 0;
+    match auction_extended.reward_size {
+        Some(val) => reward = val,
+        None => reward=0,
+    };
+    
+    if res==1 {
+        // Transfer amount of SPL token to bid account.
         spl_token_transfer(TokenTransferParams {
             source: accounts.bidder_token.clone(),
             destination: accounts.bidder_pot_token.clone(),
@@ -320,8 +337,48 @@ pub fn place_bid<'r, 'b: 'r>(
             token_program: accounts.token_program.clone(),
             amount: real_amount,
         })?;
+
+        let prev_auction_bump=assert_derivation(
+            program_id,
+            accounts.auction,
+            &[
+                PREFIX.as_bytes(),
+                program_id.as_ref(),
+                args.resource.as_ref(),
+            ]
+        )?;
+        let prev_auction_seeds=&[
+            PREFIX.as_bytes(),
+            program_id.as_ref(),
+            args.resource.as_ref(),
+            &[prev_auction_bump],
+        ];
+        let source_account : Account = assert_initialized(accounts.prev_bidder_pot_token)?;
+        spl_token_transfer(TokenTransferParams{
+            source : accounts.prev_bidder_pot_token.clone(),
+            destination : accounts.prev_bidder_token.clone(),
+            authority : accounts.auction.clone(),
+            authority_signer_seeds : prev_auction_seeds,
+            token_program : accounts.token_program.clone(),
+            amount : source_account.amount,
+        })?;
+        
+        if reward > 0 {
+            msg!("This is reward {}",reward);
+            // let prev_key=auction.get_prev_key()?;
+            spl_token_transfer_2(TokenTransferParams_2 {
+                source: accounts.bidder_token.clone(),
+                destination :  accounts.prev_bidder_token.clone() ,
+                authority: accounts.bidder.clone(),
+                token_program : accounts.token_program.clone(),
+                amount: reward,
+            })?;
+        }    
+        auction.bid_state.cancel_prev_bid();
+        
     }
-    
+
+
     auction.serialize(&mut *accounts.auction.data.borrow_mut())?;
 
     // Update latest metadata with results from the bid.

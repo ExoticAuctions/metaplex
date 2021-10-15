@@ -1,8 +1,12 @@
-import React from 'react';
-import { Routes } from './routes';
-
-function App() {
-  return <Routes />;
+import React,{Component} from 'react';
+import './bootstrap.min.css';
+//import RoomSelect from './RoomSelect'
+// import DeployPage from './pages/deploy'
+import AuctionPage from './pages/auction'
+export default class App extends Component{
+  render = () => {
+    return <div>
+      <AuctionPage/>
+    </div>
+  }
 }
-
-export default App;

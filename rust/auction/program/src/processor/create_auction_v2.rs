@@ -4,7 +4,7 @@ use crate::{
     errors::AuctionError,
     processor::create_auction::*,
     processor::{
-        AuctionData, AuctionDataExtended, AuctionName, AuctionState, Bid, BidState, PriceFloor,
+        AuctionData, AuctionDataExtended, AuctionState, Bid, BidState, PriceFloor,
         WinnerLimit, BASE_AUCTION_DATA_SIZE, MAX_AUCTION_DATA_EXTENDED_SIZE,
     },
     utils::{assert_derivation, assert_owned_by, create_or_allocate_account_raw},
@@ -46,9 +46,7 @@ pub struct CreateAuctionArgsV2 {
     /// Add a minimum percentage increase each bid must meet.
     pub gap_tick_size_percentage: Option<u8>,
     /// Add a instant sale price.
-    pub instant_sale_price: Option<u64>,
-    /// Auction name
-    pub name: Option<AuctionName>,
+    pub reward_size: Option<u64>,
 }
 
 struct Accounts<'a, 'b: 'a> {
@@ -93,7 +91,6 @@ pub fn create_auction_v2(
             tick_size: args.tick_size,
             gap_tick_size_percentage: args.gap_tick_size_percentage,
         },
-        args.instant_sale_price,
-        args.name,
+        args.reward_size,
     )
 }
